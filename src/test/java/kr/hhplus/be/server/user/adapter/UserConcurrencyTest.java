@@ -1,6 +1,5 @@
 package kr.hhplus.be.server.user.adapter;
 
-
 import kr.hhplus.be.server.user.domain.User;
 import kr.hhplus.be.server.user.infra.persistence.UserJpaRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,13 +8,19 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
+import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -23,7 +28,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
-public class UserIntegrationTest {
+public class UserConcurrencyTest {
 
     @Autowired
     private MockMvc mockMvc;
@@ -44,6 +49,7 @@ public class UserIntegrationTest {
         registry.add("spring.datasource.password", mysql::getPassword);
     }
 
+
     private Long savedUserId;
 
     @BeforeEach
@@ -52,28 +58,38 @@ public class UserIntegrationTest {
 
         User user = new User();
 
-        user = userJpaRepository.save(new User(1L, 1000L));
+        user = userJpaRepository.save(new User(1000L));
         savedUserId = user.getId();
     }
 
     @Test
-    void 포인트_충전_성공() throws Exception {
+    void 동시에_포인트_충전시_낙관적락_충돌_발생() throws Exception {
+        int threadCount = 2;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch latch = new CountDownLatch(threadCount);
         String json = "{\"amount\":500}";
 
-        mockMvc.perform(post("/users/" + savedUserId + "/charge")
-                        .contentType("application/json")
-                        .content(json))
-                .andExpect(status().isOk());
-    }
+        for (int i = 0; i < threadCount; i++) {
+            executor.execute(() -> {
+                try {
+                    mockMvc.perform(post("/users/" + savedUserId + "/charge")
+                                    .contentType(APPLICATION_JSON)
+                                    .content(json))
+                            .andExpect(status().isOk());
+                } catch (Exception e) {
+                    System.out.println("충돌 발생: " + e.getMessage());
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
 
-    @Test
-    void 포인트_사용_성공() throws Exception {
-        String json = "{\"amount\":200}";
+        latch.await();
 
-        mockMvc.perform(post("/users/" + savedUserId + "/use")
-                        .contentType("application/json")
-                        .content(json))
-                .andExpect(status().isOk());
+        User user = userJpaRepository.findById(savedUserId).orElseThrow();
+        System.out.println("최종 포인트: " + user.getPoint());
+
+        assertThat(user.getPoint()).isEqualTo(1500L);
     }
 
 }
